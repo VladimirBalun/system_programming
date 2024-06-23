@@ -8,20 +8,25 @@
 #define STACK_SIZE 2 << 20
 
 typedef struct coroutine_t {
-    ucontext_t*    context;
-    coroutine_fn_t function;
+    ucontext_t*        context;
+    coroutine_status_t status;
 } coroutine_t;
 
-static ucontext_t* create_context();
+static ucontext_t* __create_context();
 
-coroutine_t* coroutine_init(coroutine_fn_t function)
+coroutine_t* coroutine_init(scheduler_t* scheduler, coroutine_trampline_fn_t coroutine_trampline_fn, coroutine_fn_t coroutine_fn)
 {
-    if (!function) {
+    if (!scheduler) {
+        fprintf(stderr, "incorrect scheduller\n");
+        return NULL;       
+    }
+
+    if (!coroutine_trampline_fn) {
         fprintf(stderr, "incorrect function\n");
         return NULL;
     }
 
-    ucontext_t* context = create_context();
+    ucontext_t* context = __create_context();
     if (!context) {
         fprintf(stderr, "failed to create coroutine context\n");
         return NULL;
@@ -34,8 +39,8 @@ coroutine_t* coroutine_init(coroutine_fn_t function)
     }
 
     coroutine->context = context;
-    coroutine->function = function;
-    makecontext(coroutine->context, coroutine->function, 1);
+    coroutine->status = STATUS_RUNNABLE;
+    makecontext(coroutine->context, (void (*)())coroutine_trampline_fn, 2, scheduler, coroutine_fn);
 
     return coroutine;
 }
@@ -45,19 +50,40 @@ void coroutine_run(coroutine_t* coroutine)
     if (!coroutine)
         return;
 
+    coroutine->status = STATUS_RUNNING;
     setcontext(coroutine->context);
 }
 
-void coroutine_swap(coroutine_t* from_coroutine, coroutine_t* to_coroutine)
+coroutine_status_t coroutine_status(coroutine_t* coroutine)
+{
+    if (!coroutine)
+        return STATUS_STOPPED;
+
+    return coroutine->status;
+}
+
+void coroutine_switch(coroutine_t* from_coroutine, coroutine_t* to_coroutine)
 {
     if (!from_coroutine || !to_coroutine) {
         fprintf(stderr, "incorrect coroutines\n");
         return;
     }
 
+    if (from_coroutine->status != STATUS_STOPPED)
+        from_coroutine->status = STATUS_RUNNABLE;
+
+    to_coroutine->status = STATUS_RUNNING;
     if (swapcontext(from_coroutine->context, to_coroutine->context) < 0) {
         fprintf(stderr, "failed to swap context\n");
     }
+}
+
+void coroutine_stop(coroutine_t* coroutine)
+{
+    if (!coroutine)
+        return;
+
+    coroutine->status = STATUS_STOPPED;
 }
 
 void coroutine_destroy(coroutine_t* coroutine)
@@ -70,7 +96,7 @@ void coroutine_destroy(coroutine_t* coroutine)
     free(coroutine);
 }
 
-static ucontext_t* create_context()
+static ucontext_t* __create_context()
 {
     void* stack = malloc(STACK_SIZE);
     if (!stack) {
