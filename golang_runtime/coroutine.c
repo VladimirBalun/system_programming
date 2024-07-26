@@ -5,53 +5,85 @@
 #include <signal.h>
 #include <ucontext.h>
 
-#define STACK_SIZE 2 << 20
+#include "utils.h"
+#include "scheduler.h"
+
+#define STACK_SIZE (1 << 20) * 2
 
 typedef struct coroutine_t {
+    scheduler_t*       scheduler;
     ucontext_t*        context;
     coroutine_status_t status;
 } coroutine_t;
 
 static ucontext_t* __create_context();
+static void __coroutine_trampline(coroutine_t*, coroutine_fn_t);
 
-coroutine_t* coroutine_init(scheduler_t* scheduler, coroutine_trampline_fn_t coroutine_trampline_fn, coroutine_fn_t coroutine_fn)
+coroutine_t* coroutine_init(coroutine_fn_t coroutine_fn)
 {
-    if (!scheduler) {
-        fprintf(stderr, "incorrect scheduller\n");
-        return NULL;       
-    }
-
-    if (!coroutine_trampline_fn) {
-        fprintf(stderr, "incorrect function\n");
-        return NULL;
-    }
-
     ucontext_t* context = __create_context();
     if (!context) {
-        fprintf(stderr, "failed to create coroutine context\n");
+        fprintf(stderr, "[%s:%d] failed to create coroutine context\n", __FILE__, __LINE__);
         return NULL;
     }
 
     coroutine_t* coroutine = malloc(sizeof(coroutine_t));
     if (!coroutine) {
-        fprintf(stderr, "failed to allocate memory for coroutine\n");
+        fprintf(stderr, "[%s:%d] failed to allocate memory for coroutine\n", __FILE__, __LINE__);
         return NULL;
     }
 
+    coroutine->scheduler = NULL;
     coroutine->context = context;
     coroutine->status = STATUS_RUNNABLE;
-    makecontext(coroutine->context, (void (*)())coroutine_trampline_fn, 2, scheduler, coroutine_fn);
+    makecontext(coroutine->context, (void (*)())__coroutine_trampline, 2, coroutine, coroutine_fn);
 
     return coroutine;
 }
 
-void coroutine_run(coroutine_t* coroutine)
+void coroutine_set_scheduler(coroutine_t* coroutine, scheduler_t* scheduler)
 {
-    if (!coroutine)
+    if (!coroutine) {
+        fprintf(stderr, "[%s:%d] incorrect coroutine\n", __FILE__, __LINE__);
         return;
+    }
 
-    coroutine->status = STATUS_RUNNING;
-    setcontext(coroutine->context);
+    coroutine->scheduler = scheduler;
+}
+
+scheduler_t* coroutine_get_scheduler(coroutine_t* coroutine)
+{
+    if (!coroutine) {
+        fprintf(stderr, "[%s:%d] incorrect coroutine\n", __FILE__, __LINE__);
+        return NULL;
+    }
+
+    return coroutine->scheduler;
+}
+
+coroutine_t* coroutine_make_current_context()
+{
+    ucontext_t* context = __create_context();
+    if (!context) {
+        fprintf(stderr, "[%s:%d] failed to create coroutine context\n", __FILE__, __LINE__);
+        return NULL;
+    }
+
+    if (getcontext(context) < 0) {
+        fprintf(stderr, "[%s:%d] failed to initialize context\n", __FILE__, __LINE__);
+        return NULL;
+    }
+
+    coroutine_t* coroutine = malloc(sizeof(coroutine_t));
+    if (!coroutine) {
+        fprintf(stderr, "[%s:%d] failed to allocate memory for coroutine\n", __FILE__, __LINE__);
+        return NULL;
+    }
+
+    coroutine->scheduler = NULL;
+    coroutine->context = context;
+    coroutine->status = STATUS_RUNNABLE;
+    return coroutine;
 }
 
 coroutine_status_t coroutine_status(coroutine_t* coroutine)
@@ -65,7 +97,7 @@ coroutine_status_t coroutine_status(coroutine_t* coroutine)
 void coroutine_switch(coroutine_t* from_coroutine, coroutine_t* to_coroutine)
 {
     if (!from_coroutine || !to_coroutine) {
-        fprintf(stderr, "incorrect coroutines\n");
+        fprintf(stderr, "[%s:%d] incorrect coroutines\n", __FILE__, __LINE__);
         return;
     }
 
@@ -73,46 +105,49 @@ void coroutine_switch(coroutine_t* from_coroutine, coroutine_t* to_coroutine)
         from_coroutine->status = STATUS_RUNNABLE;
 
     to_coroutine->status = STATUS_RUNNING;
-    if (swapcontext(from_coroutine->context, to_coroutine->context) < 0) {
-        fprintf(stderr, "failed to swap context\n");
-    }
+    if (swapcontext(from_coroutine->context, to_coroutine->context) < 0)
+        fprintf(stderr, "[%s:%d] failed to swap context\n", __FILE__, __LINE__);
 }
 
 void coroutine_stop(coroutine_t* coroutine)
 {
-    if (!coroutine)
+    if (!coroutine) {
+        fprintf(stderr, "[%s:%d] incorrect coroutine\n", __FILE__, __LINE__);
         return;
+    }
 
     coroutine->status = STATUS_STOPPED;
 }
 
-void coroutine_destroy(coroutine_t* coroutine)
+void coroutine_destroy(coroutine_t** coroutine)
 {
-    if (!coroutine)
+    if (!coroutine || !(*coroutine)) {
+        fprintf(stderr, "[%s:%d] incorrect coroutine\n", __FILE__, __LINE__);
         return;
+    }
 
-    free(coroutine->context->uc_stack.ss_sp);
-    free(coroutine->context);
-    free(coroutine);
+    SAFE_DELETE((*coroutine)->context->uc_stack.ss_sp);
+    SAFE_DELETE((*coroutine)->context);
+    SAFE_DELETE(*coroutine);
 }
 
 static ucontext_t* __create_context()
 {
     void* stack = malloc(STACK_SIZE);
     if (!stack) {
-        fprintf(stderr, "failed to allocate memory for stack\n");
+        fprintf(stderr, "[%s:%d] failed to allocate memory for stack\n", __FILE__, __LINE__);
         return NULL;
     }
 
     ucontext_t* context = malloc(sizeof(ucontext_t));
     if (!context) {
-        fprintf(stderr, "failed to allocate memory for context\n");
+        fprintf(stderr, "[%s:%d] failed to allocate memory for context\n", __FILE__, __LINE__);
         free(stack);
         return NULL;
     }
 
     if (getcontext(context) < 0) {
-        fprintf(stderr, "failed to initialize context\n");
+        fprintf(stderr, "[%s:%d] failed to initialize context\n", __FILE__, __LINE__);
         free(stack);
         free(context);
         return NULL;
@@ -123,4 +158,22 @@ static ucontext_t* __create_context()
     context->uc_stack.ss_flags = 0;
     
     return context;
+}
+
+static void __coroutine_trampline(coroutine_t* coroutine, coroutine_fn_t function)
+{
+    if (!coroutine) {
+        fprintf(stderr, "[%s:%d] incorrect coroutine\n", __FILE__, __LINE__);
+        return;        
+    }
+
+    if (!function) {
+        fprintf(stderr, "[%s:%d] incorrect function\n", __FILE__, __LINE__);
+        return;        
+    }
+
+    function(coroutine);
+
+    coroutine_stop(coroutine);
+    coroutine_switch(coroutine, scheduler_get_scheduling_coroutine(coroutine->scheduler));
 }
